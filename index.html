@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stock Tracker</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+</head>
+<body>
+
+<form id="form">
+  <input type="text" id="symbol" placeholder="Symbol (e.g., TCS)" required />
+  <select id="exchange">
+    <option value="NSE" selected>NSE</option>
+    <option value="BSE">BSE</option>
+    <option value="NASDAQ">NASDAQ</option>
+    <option value="NYSE">NYSE</option>
+  </select>
+  <button type="submit" class="fetch-btn">Fetch</button>
+</form>
+
+<div id="status"></div>
+
+<div class="tabs">
+  <button class="tab-btn active" data-section="debug">Debug</button>
+  <button class="tab-btn" data-section="info">Info</button>
+  <button class="tab-btn" data-section="intraday">Intraday</button>
+  <button class="tab-btn" data-section="daily">Daily</button>
+  <button class="tab-btn" data-section="results">Results</button>
+  <button class="tab-btn" data-section="balance">Balance Sheet</button>
+  <button class="tab-btn" data-section="cashflow">Cashflow</button>
+</div>
+
+<div id="dataContainer"><pre>Waiting for data...</pre></div>
+
+<div id="indicatorControls"></div>
+<div id="daily-chart-container"></div>
+
+<script type="module" src="script-api.js"></script>
+<script type="module" src="script-tables.js"></script>
+<script type="module" src="script-indicators.js"></script>
+<script type="module" src="script-charts.js"></script>
+
+</body>
+</html>
