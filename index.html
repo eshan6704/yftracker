@@ -1,45 +1,1079 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Stock Tracker</title>
-<link rel="stylesheet" href="style.css">
-<script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <meta charset="UTF-8" />
+  <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
+  <script type="module">
+    import { Client } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
+
+    /*****************************************************************
+     *  TRACKER FRONTEND + INDICATORS (All computation in-browser JS)
+     *  - Keeps your original sections and API integration
+     *  - Adds indicator panel (intraday/daily) with Apply / Clear
+     *****************************************************************/
+    async function main() {
+      console.log("[DEBUG] Initializing tracker frontend...");
+      // try connect but don't block the UI; we'll reconnect on-demand if needed
+      let app = null;
+      try {
+        app = await Client.connect("eshan6704/trackerbackend");
+        console.log("[DEBUG] Connected to trackerbackend.");
+      } catch (err) {
+        console.warn("[DEBUG] Initial connect failed (will retry on submit):", err);
+      }
+ 
+       const form = document.getElementById("form");
+       // restore classic status element below the controls
+       const statusEl = document.getElementById("status");
+  
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const symbol = document.getElementById("symbol").value.trim();
+          // Exchange fixed to NSE (removed input field)
+          const exchange = "NSE";
+          if (!symbol || !exchange) {
+            if (statusEl) { statusEl.textContent = "Please enter a Symbol (Exchange is fixed to NSE)."; statusEl.className = "status status--error"; }
+            return;
+          }
+          if (statusEl) { statusEl.textContent = `Fetching ${symbol}, ${exchange}...`; statusEl.className = "status status--loading"; }
+
+          try {
+            // ensure connection before predict (retry if initial connect failed)
+            if (!app) {
+              try {
+                app = await Client.connect("eshan6704/trackerbackend");
+                console.log("[DEBUG] Reconnected to trackerbackend.");
+              } catch (reErr) {
+                console.error("[DEBUG] Reconnect failed:", reErr);
+                if (statusEl) { statusEl.textContent = `Connection failed: ${reErr?.message || reErr}`; statusEl.className = "status status--error"; }
+                document.getElementById('dataContainer').innerHTML = `<pre>${String(reErr && (reErr.stack || reErr))}</pre>`;
+                return;
+              }
+            }
+            const result = await app.predict("/fetch_data", [symbol, exchange]);
+            console.log("[DEBUG] API response:", result);
+            window.lastResponse = result.data;
+            // show full result in the page for debugging
+            document.getElementById('dataContainer').innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
+            if (statusEl) { statusEl.textContent = "Data loaded successfully."; statusEl.className = "status status--success"; }
+            showSection("debug");
+          } catch (err) {
+            console.error("Fetch error (submit):", err);
+            document.getElementById('dataContainer').innerHTML = `<pre>Error: ${String(err && (err.stack || err))}</pre>`;
+            if (statusEl) { statusEl.textContent = `Error fetching data: ${err?.message || err}`; statusEl.className = "status status--error"; }
+          }
+        });
+
+       // handle inline submit-preventer (dispatches 'yftracker:submit')
+       document.addEventListener('yftracker:submit', async (ev) => {
+         const payload = ev?.detail || {};
+         const symbol = (payload.symbol || '').trim();
+         const exchange = (payload.exchange || 'NSE').trim();
+         console.log('[EVENT] yftracker:submit ->', { symbol, exchange });
+         if (!symbol) {
+           if (statusEl) { statusEl.textContent = "Please enter a Symbol."; statusEl.className = "status status--error"; }
+           return;
+         }
+         if (statusEl) { statusEl.textContent = `Fetching ${symbol}, ${exchange}...`; statusEl.className = "status status--loading"; }
+         try {
+           if (!app) {
+             try {
+               app = await Client.connect("eshan6704/trackerbackend");
+               console.log("[DEBUG] Reconnected to trackerbackend (event).");
+             } catch (reErr) {
+               console.error("[DEBUG] Reconnect failed (event):", reErr);
+               if (statusEl) { statusEl.textContent = `Connection failed: ${reErr?.message || reErr}`; statusEl.className = "status status--error"; }
+               document.getElementById('dataContainer').innerHTML = `<pre>${String(reErr && (reErr.stack || reErr))}</pre>`;
+               return;
+             }
+           }
+           const result = await app.predict("/fetch_data", [symbol, exchange]);
+           console.log("[DEBUG] API response (event):", result);
+           window.lastResponse = result.data;
+           document.getElementById('dataContainer').innerHTML = `<pre>${JSON.stringify(result, null, 2)}</pre>`;
+           if (statusEl) { statusEl.textContent = "Data loaded successfully."; statusEl.className = "status status--success"; }
+           showSection("debug");
+         } catch (err) {
+           console.error("Fetch error (event):", err);
+           document.getElementById('dataContainer').innerHTML = `<pre>Error: ${String(err && (err.stack || err))}</pre>`;
+           if (statusEl) { statusEl.textContent = `Error fetching data: ${err?.message || err}`; statusEl.className = "status status--error"; }
+         }
+       });
+ 
+      document.querySelectorAll(".tab-btn").forEach(btn =>
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+          btn.classList.add("active");
+          showSection(btn.dataset.section);
+        })
+      );
+
+      // make Debug the default visible section
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      const debugBtn = document.querySelector('.tab-btn[data-section="debug"]');
+      if (debugBtn) debugBtn.classList.add('active');
+      showSection('debug');
+    }
+
+    /* ---------------------------
+       Section/data helpers
+       --------------------------- */
+    async function showSection(section) {
+      const container = document.getElementById("dataContainer");
+      const row = (window.lastResponse && window.lastResponse[0]) ? window.lastResponse[0] : {};
+      container.innerHTML = "";
+
+      // wrapper for table/chart sections. If height === null => auto-sized with max-height
+      function tableWrapper(id, html, height = 500) {
+        const w = document.createElement("div");
+        w.id = id;
+        w.className = "table-wrapper";
+        if (height === null) {
+          w.style.height = "auto";
+          w.style.maxHeight = "60vh";
+        } else {
+          w.style.height = `${height}px`;
+        }
+        w.style.overflowY = "auto";
+        w.style.marginTop = "10px";
+        w.innerHTML = html;
+        return w;
+      }
+
+      function controls(sectionName, showChartDropdown = false) {
+        const c = document.createElement("div");
+        c.className = "section-controls";
+
+        // Chart type selector (line/candle/bar/area)
+        if (showChartDropdown) {
+          const sel = document.createElement("select");
+          sel.className = "chart-type";
+          sel.dataset.section = sectionName;
+          sel.innerHTML = `
+            <option value="line">Line</option>
+            <option value="candlestick">Candle</option>
+            <option value="bar">Bar</option>
+            <option value="area">Area</option>
+          `;
+          sel.addEventListener("change", (e) => {
+            const t = e.target.value;
+            const sectionData = getSectionData(sectionName);
+            if (!sectionData || !sectionData.length) return;
+            const old = document.getElementById(`${sectionName}-chartDiv`);
+            if (old) old.remove();
+            plotChart(sectionData, sectionName === "intraday" ? "Intraday (5m)" : "Daily", container, t, sectionName);
+          });
+          c.appendChild(sel);
+        }
+
+        // Toggle table button
+        const toggle = document.createElement("button");
+        toggle.className = "toggle-btn";
+        toggle.textContent = "Hide Table";
+        toggle.dataset.section = sectionName;
+        toggle.addEventListener("click", (e) => {
+          const sec = e.target.dataset.section;
+          const table = document.getElementById(`${sec}-table`);
+          if (!table) return;
+          if (table.style.display === "none") {
+            table.style.display = "block";
+            e.target.textContent = "Hide Table";
+          } else {
+            table.style.display = "none";
+            e.target.textContent = "Show Table";
+          }
+        });
+        c.appendChild(toggle);
+
+        // Indicator panel only for daily/intraday
+        if (sectionName === "intraday" || sectionName === "daily") {
+          const indicatorDiv = document.createElement("div");
+          indicatorDiv.className = "indicator-controls";
+          indicatorDiv.style.marginLeft = "auto";
+          indicatorDiv.innerHTML = `
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <label><input type="checkbox" id="${sectionName}-ma"> MA</label>
+              <div id="${sectionName}-ma-opts" style="display:none">
+                <select id="${sectionName}-ma-type">
+                  <option value="SMA">SMA</option>
+                  <option value="EMA">EMA</option>
+                  <option value="WMA">WMA</option>
+                  <option value="TMA">TMA</option>
+                </select>
+                <select id="${sectionName}-ma-period">
+                  <option value="5">5</option><option value="10">10</option><option value="21">21</option><option value="50">50</option><option value="200">200</option>
+                </select>
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-bb"> Bollinger</label>
+              <div id="${sectionName}-bb-opts" style="display:none">
+                <input type="number" id="${sectionName}-bb-period" value="20" min="1" style="width:60px"> 
+                <input type="number" id="${sectionName}-bb-mult" value="2" step="0.1" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-kc"> Keltner</label>
+              <div id="${sectionName}-kc-opts" style="display:none">
+                <input type="number" id="${sectionName}-kc-ema" value="20" style="width:60px"> 
+                <input type="number" id="${sectionName}-kc-mult" value="1.5" step="0.1" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-donch"> Donchian</label>
+              <div id="${sectionName}-donch-opts" style="display:none">
+                <input type="number" id="${sectionName}-donch-period" value="20" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-super"> Supertrend</label>
+              <div id="${sectionName}-super-opts" style="display:none">
+                <input type="number" id="${sectionName}-super-atr" value="10" style="width:60px"> 
+                <input type="number" id="${sectionName}-super-f" value="3" step="0.1" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-atr"> ATR (subplot)</label>
+              <div id="${sectionName}-atr-opts" style="display:none">
+                <input type="number" id="${sectionName}-atr-period" value="14" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-macd"> MACD</label>
+              <div id="${sectionName}-macd-opts" style="display:none">
+                <input type="number" id="${sectionName}-macd-fast" value="12" style="width:60px">
+                <input type="number" id="${sectionName}-macd-slow" value="26" style="width:60px">
+                <input type="number" id="${sectionName}-macd-sig" value="9" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-rsi"> RSI</label>
+              <div id="${sectionName}-rsi-opts" style="display:none">
+                <input type="number" id="${sectionName}-rsi-period" value="14" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-stoch"> Stoch</label>
+              <div id="${sectionName}-stoch-opts" style="display:none">
+                <input type="number" id="${sectionName}-stoch-k" value="14" style="width:60px">
+                <input type="number" id="${sectionName}-stoch-d" value="3" style="width:60px">
+              </div>
+
+              <label><input type="checkbox" id="${sectionName}-obv"> OBV</label>
+
+              <button id="${sectionName}-apply" style="padding:6px 10px;border-radius:6px;background:#2a9d8f;color:white;border:none">Apply</button>
+              <button id="${sectionName}-clear" style="padding:6px 10px;border-radius:6px;background:#ef4444;color:white;border:none">Clear</button>
+            </div>
+          `;
+          c.appendChild(indicatorDiv);
+
+          // wire toggles
+          const toggles = ["ma","bb","kc","donch","super","atr","macd","rsi","stoch"];
+          toggles.forEach(t=>{
+            const chk = document.getElementById(`${sectionName}-${t}`);
+            const opt = document.getElementById(`${sectionName}-${t}-opts`);
+            chk?.addEventListener("change", (e) => {
+              if(opt) opt.style.display = e.target.checked ? "inline-flex" : "none";
+            });
+          });
+
+          // apply / clear handlers
+          indicatorDiv.querySelector(`#${sectionName}-apply`).addEventListener("click", () => {
+            const data = getSectionData(sectionName);
+            if(!data || !data.length) return;
+            const opts = readIndicatorOptions(sectionName);
+            applyIndicators(data, sectionName, opts);
+          });
+          indicatorDiv.querySelector(`#${sectionName}-clear`).addEventListener("click", () => {
+            const data = getSectionData(sectionName);
+            if(!data || !data.length) return;
+            resetChart(data, sectionName);
+          });
+        }
+
+        return c;
+      }
+
+      function getSectionData(name) {
+        if (!window.lastResponse || !window.lastResponse[0]) return [];
+        const row = window.lastResponse[0];
+        if (name === "intraday") return row.intraday_5min || [];
+        if (name === "daily") return row.historical_daily || [];
+        if (name === "results") return row.financials || {};
+        if (name === "balance") return row.balance_sheet || {};
+        if (name === "cashflow") return row.cashflow || {};
+        if (name === "info") return row.info || {};
+        return [];
+      }
+
+      if (section === "debug") {
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(row, null, 2);
+        pre.style.maxHeight = "500px";
+        pre.style.overflowY = "auto";
+        container.appendChild(pre);
+        return;
+      }
+
+      if (section === "info") {
+        container.appendChild(controls("info", false));
+        // simple auto-sized info table (restored)
+        container.appendChild(tableWrapper("info-table", createTable(row.info || {}), null));
+        return;
+      }
+
+      if (section === "intraday") {
+        const intraday = row.intraday_5min || [];
+        if (!intraday.length) { container.innerHTML = "<p>No intraday data</p>"; return; }
+
+        container.appendChild(controls("intraday", true));
+        plotChart(intraday, "Intraday (5m)", container, "line", "intraday");
+        const tbl = tableWrapper("intraday-table", createTableFromArray(intraday));
+        tbl.id = "intraday-table";
+        container.appendChild(tbl);
+        return;
+      }
+
+      if (section === "daily") {
+        const daily = row.historical_daily || [];
+        if (!daily.length) { container.innerHTML = "<p>No daily data</p>"; return; }
+
+        container.appendChild(controls("daily", true));
+        plotChart(daily, "Daily", container, "line", "daily");
+        const tbl = tableWrapper("daily-table", createTableFromArray(daily));
+        tbl.id = "daily-table";
+        container.appendChild(tbl);
+        return;
+      }
+
+      if (section === "results") {
+        container.appendChild(controls("results", false));
+        const fin = row.financials || {};
+        const html = `<h3>Quarterly Results</h3>${createTableFromArray(fin.quarterly || [])}<h3>Yearly Results</h3>${createTableFromArray(fin.yearly || [])}`;
+        const w = tableWrapper("results-table", html);
+        w.id = "results-table";
+        container.appendChild(w);
+        return;
+      }
+
+      if (section === "balance") {
+        container.appendChild(controls("balance", false));
+        const bs = row.balance_sheet || {};
+        const html = `<h3>Quarterly Balance Sheet</h3>${createTableFromArray(bs.quarterly || [])}<h3>Yearly Balance Sheet</h3>${createTableFromArray(bs.yearly || [])}`;
+        const w = tableWrapper("balance-table", html);
+        w.id = "balance-table";
+        container.appendChild(w);
+        return;
+      }
+
+      if (section === "cashflow") {
+        container.appendChild(controls("cashflow", false));
+        const cf = row.cashflow || {};
+        const html = `<h3>Quarterly Cashflow</h3>${createTableFromArray(cf.quarterly || [])}<h3>Yearly Cashflow</h3>${createTableFromArray(cf.yearly || [])}`;
+        const w = tableWrapper("cashflow-table", html);
+        w.id = "cashflow-table";
+        container.appendChild(w);
+        return;
+      }
+    }
+
+    /* ---------------------------
+       Plotting + Indicators (browser-only)
+       --------------------------- */
+
+    function resetChart(arr, sectionName) {
+      // remove old chart and replot base
+      const container = document.getElementById("dataContainer");
+      const old = document.getElementById(`${sectionName}-chartDiv`);
+      if (old) old.remove();
+      plotChart(arr, sectionName === "intraday" ? "Intraday (5m)" : "Daily", container, "line", sectionName);
+    }
+
+    function readIndicatorOptions(prefix) {
+      // build opts object from UI controls
+      const opt = {};
+      opt.ma = document.getElementById(`${prefix}-ma`).checked;
+      if (opt.ma) { opt.maType = document.getElementById(`${prefix}-ma-type`).value; opt.maPeriod = parseInt(document.getElementById(`${prefix}-ma-period`).value); }
+      opt.bb = document.getElementById(`${prefix}-bb`).checked;
+      if (opt.bb) { opt.bbPeriod = parseInt(document.getElementById(`${prefix}-bb-period`).value); opt.bbMult = parseFloat(document.getElementById(`${prefix}-bb-mult`).value); }
+      opt.kc = document.getElementById(`${prefix}-kc`).checked;
+      if (opt.kc) { opt.kcEma = parseInt(document.getElementById(`${prefix}-kc-ema`).value); opt.kcMult = parseFloat(document.getElementById(`${prefix}-kc-mult`).value); }
+      opt.donch = document.getElementById(`${prefix}-donch`).checked;
+      if (opt.donch) opt.donchPeriod = parseInt(document.getElementById(`${prefix}-donch-period`).value);
+      opt.super = document.getElementById(`${prefix}-super`).checked;
+      if (opt.super) { opt.superAtr = parseInt(document.getElementById(`${prefix}-super-atr`).value); opt.superFactor = parseFloat(document.getElementById(`${prefix}-super-f`).value); }
+      opt.atr = document.getElementById(`${prefix}-atr`).checked;
+      if (opt.atr) opt.atrPeriod = parseInt(document.getElementById(`${prefix}-atr-period`).value);
+      opt.macd = document.getElementById(`${prefix}-macd`).checked;
+      if (opt.macd) { opt.macdFast = parseInt(document.getElementById(`${prefix}-macd-fast`).value); opt.macdSlow = parseInt(document.getElementById(`${prefix}-macd-slow`).value); opt.macdSig = parseInt(document.getElementById(`${prefix}-macd-sig`).value); }
+      opt.rsi = document.getElementById(`${prefix}-rsi`).checked;
+      if (opt.rsi) opt.rsiPeriod = parseInt(document.getElementById(`${prefix}-rsi-period`).value);
+      opt.stoch = document.getElementById(`${prefix}-stoch`).checked;
+      if (opt.stoch) { opt.stochK = parseInt(document.getElementById(`${prefix}-stoch-k`).value); opt.stochD = parseInt(document.getElementById(`${prefix}-stoch-d`).value); }
+      opt.obv = document.getElementById(`${prefix}-obv`).checked;
+      return opt;
+    }
+
+    // indicator math helpers (carefully implemented)
+    function sma(arr, period) {
+      const out = [];
+      for (let i = 0; i < arr.length; i++) {
+        if (i < period - 1) { out.push(null); continue; }
+        let s = 0;
+        for (let j = i - period + 1; j <= i; j++) s += arr[j];
+        out.push(s / period);
+      }
+      return out;
+    }
+
+    function ema(arr, period) {
+      const out = [];
+      const k = 2 / (period + 1);
+      out[0] = arr[0];
+      for (let i = 1; i < arr.length; i++) {
+        out[i] = arr[i] * k + out[i - 1] * (1 - k);
+      }
+      return out;
+    }
+
+    function wma(arr, period) {
+      const out = [];
+      for (let i = 0; i < arr.length; i++) {
+        if (i < period - 1) { out.push(null); continue; }
+        const slice = arr.slice(i - period + 1, i + 1);
+        let num = 0, den = 0;
+        for (let j = 0; j < period; j++) { num += slice[j] * (j + 1); den += (j + 1); }
+        out.push(num / den);
+      }
+      return out;
+    }
+
+    function tma(arr, period) {
+      // triangular MA approx: SMA of SMA
+      return sma(sma(arr, period), period);
+    }
+
+    function trueRangeArr(highs, lows, closes) {
+      const tr = [];
+      for (let i = 0; i < highs.length; i++) {
+        if (i === 0) tr.push(highs[0] - lows[0]);
+        else tr.push(Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1])));
+      }
+      return tr;
+    }
+    function ATR(highs, lows, closes, period) {
+      const tr = trueRangeArr(highs, lows, closes);
+      return sma(tr, period);
+    }
+
+    function bollinger(closes, period = 20, mult = 2) {
+      const mid = sma(closes, period);
+      const upper = [], lower = [];
+      for (let i = 0; i < closes.length; i++) {
+        if (i < period - 1) { upper.push(null); lower.push(null); continue; }
+        const slice = closes.slice(i - period + 1, i + 1);
+        const mean = mid[i];
+        let sd = 0;
+        for (let s of slice) sd += (s - mean) ** 2;
+        sd = Math.sqrt(sd / period);
+        upper.push(mean + mult * sd);
+        lower.push(mean - mult * sd);
+      }
+      return { mid, upper, lower };
+    }
+
+    function keltner(closes, highs, lows, emaPeriod = 20, atrPeriod = 10, mult = 1.5) {
+      const ma = ema(closes, emaPeriod);
+      const atr = ATR(highs, lows, closes, atrPeriod);
+      const upper = [], lower = [];
+      for (let i = 0; i < closes.length; i++) {
+        const a = atr[i] || null;
+        upper.push(ma[i] != null && a != null ? ma[i] + mult * a : null);
+        lower.push(ma[i] != null && a != null ? ma[i] - mult * a : null);
+      }
+      return { mid: ma, upper, lower };
+    }
+
+    function donchian(highs, lows, period = 20) {
+      const up = [], low = [];
+      for (let i = 0; i < highs.length; i++) {
+        if (i < period - 1) { up.push(null); low.push(null); continue; }
+        up.push(Math.max(...highs.slice(i - period + 1, i + 1)));
+        low.push(Math.min(...lows.slice(i - period + 1, i + 1)));
+      }
+      return { upper: up, lower: low };
+    }
+
+    function supertrend(closes, highs, lows, atrPeriod = 10, factor = 3) {
+      const atr = ATR(highs, lows, closes, atrPeriod);
+      const hl2 = highs.map((h, i) => (h + lows[i]) / 2);
+      const basicUpper = [], basicLower = [];
+      for (let i = 0; i < closes.length; i++) {
+        basicUpper[i] = hl2[i] + factor * (atr[i] || 0);
+        basicLower[i] = hl2[i] - factor * (atr[i] || 0);
+      }
+      const finalUpper = [], finalLower = [], trend = [];
+      for (let i = 0; i < closes.length; i++) {
+        if (i === 0) {
+          finalUpper[i] = basicUpper[i]; finalLower[i] = basicLower[i]; trend[i] = true; continue;
+        }
+        finalUpper[i] = (basicUpper[i] < finalUpper[i - 1] || closes[i - 1] > finalUpper[i - 1]) ? basicUpper[i] : finalUpper[i - 1];
+        finalLower[i] = (basicLower[i] > finalLower[i - 1] || closes[i - 1] < finalLower[i - 1]) ? basicLower[i] : finalLower[i - 1];
+        if (trend[i - 1] && closes[i] <= finalUpper[i]) trend[i] = true;
+        else if (!trend[i - 1] && closes[i] >= finalLower[i]) trend[i] = false;
+        else trend[i] = trend[i - 1];
+      }
+      const sup = [];
+      for (let i = 0; i < closes.length; i++) sup.push(trend[i] ? finalLower[i] : finalUpper[i]);
+      return { line: sup, dir: trend };
+    }
+
+    function macdCalc(closes, fast = 12, slow = 26, signal = 9) {
+      const fastEMA = ema(closes, fast);
+      const slowEMA = ema(closes, slow);
+      const macd = fastEMA.map((v, i) => (v != null && slowEMA[i] != null) ? v - slowEMA[i] : null);
+      const signalLine = ema(macd.map(v => v == null ? 0 : v), signal);
+      const hist = macd.map((v, i) => (v != null && signalLine[i] != null) ? v - signalLine[i] : null);
+      return { macd, signalLine, hist };
+    }
+
+    function rsiCalc(closes, period = 14) {
+      const out = [];
+      // Wilder smoothing
+      let gains = 0, losses = 0;
+      for (let i = 1; i <= period; i++) {
+        const d = closes[i] - closes[i - 1];
+        if (d > 0) gains += d; else losses += Math.abs(d);
+      }
+      let avgGain = gains / period, avgLoss = losses / period;
+      out.length = closes.length;
+      for (let i = 0; i < period; i++) out[i] = null;
+      out[period] = 100 - (100 / (1 + (avgGain / (avgLoss || 1))));
+      for (let i = period + 1; i < closes.length; i++) {
+        const d = closes[i] - closes[i - 1];
+        const g = d > 0 ? d : 0, l = d < 0 ? Math.abs(d) : 0;
+        avgGain = (avgGain * (period - 1) + g) / period;
+        avgLoss = (avgLoss * (period - 1) + l) / period;
+        const rs = avgGain / (avgLoss || 1);
+        out[i] = 100 - (100 / (1 + rs));
+      }
+      return out;
+    }
+
+    function stochCalc(highs, lows, closes, kPeriod = 14, dPeriod = 3) {
+      const k = []; const d = [];
+      for (let i = 0; i < closes.length; i++) {
+        if (i < kPeriod - 1) { k.push(null); continue; }
+        const hh = Math.max(...highs.slice(i - kPeriod + 1, i + 1));
+        const ll = Math.min(...lows.slice(i - kPeriod + 1, i + 1));
+        k.push(((closes[i] - ll) / (hh - ll)) * 100);
+      }
+      // %D as SMA of %K
+      const kd = sma(k.map(v => v == null ? 0 : v), dPeriod);
+      const dout = [];
+      for (let i = 0; i < closes.length; i++) {
+        if (i < kPeriod - 1 + dPeriod - 1) dout.push(null);
+        else {
+          const slice = k.slice(i - dPeriod + 1, i + 1);
+          dout.push(slice.reduce((a, b) => a + (b || 0), 0) / dPeriod);
+        }
+      }
+      return { k, d: dout };
+    }
+
+    function obvCalc(closes, volumes) {
+      const obv = [0];
+      for (let i = 1; i < closes.length; i++) {
+        if (closes[i] > closes[i - 1]) obv.push(obv[i - 1] + volumes[i]);
+        else if (closes[i] < closes[i - 1]) obv.push(obv[i - 1] - volumes[i]);
+        else obv.push(obv[i - 1]);
+      }
+      return obv;
+    }
+
+    /* -------------------------
+       Plot function: price + volume + indicators & subplots
+       - arr: array of rows (objects with Date/Datetime/Open/High/Low/Close/Volume)
+       - title: chart title
+       - chartType: line/candlestick/bar/area
+       - sectionName: 'intraday'|'daily'
+    ------------------------- */
+    // compute horizontal zone shapes for highest high vs its open/close and lowest low vs its open/close
+    function computeHighLowZones(arr) {
+      if (!arr || !arr.length) return [];
+      // robust number parsing
+      const toNum = (v) => {
+        if (v === null || v === undefined || v === "") return NaN;
+        const n = Number(v);
+        return isNaN(n) ? NaN : n;
+      };
+      const highs = arr.map(r => toNum(r.High ?? r.h ?? r.high ?? r['2. high'] ?? r.highest ?? 0));
+      const lows = arr.map(r => toNum(r.Low ?? r.l ?? r.low ?? r['3. low'] ?? r.lowest ?? 0));
+      const opens = arr.map(r => toNum(r.Open ?? r.o ?? r.open ?? r['1. open'] ?? NaN));
+      const closes = arr.map(r => toNum(r.Close ?? r.c ?? r.close ?? r['4. close'] ?? NaN));
+
+      const shapes = [];
+
+      // Highest high zone: area between highest high and the higher of open/close at that bar
+      const maxHigh = Math.max(...highs);
+      const idxMax = highs.indexOf(maxHigh);
+      if (idxMax >= 0 && !isNaN(maxHigh)) {
+        const ocCandidates = [opens[idxMax], closes[idxMax]].filter(v => !isNaN(v));
+        if (ocCandidates.length) {
+          const ocAtMax = Math.max(...ocCandidates);
+          // ensure proper ordering top >= bottom
+          const top = Math.max(maxHigh, ocAtMax);
+          const bottom = Math.min(maxHigh, ocAtMax);
+          // only draw if there's a visible gap
+          if (Math.abs(top - bottom) > Number.EPSILON) {
+            // shaded rect between top and bottom
+            shapes.push({
+              type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: bottom, y1: top,
+              fillcolor: 'rgba(255,165,0,0.12)', line: { width: 0 }
+            });
+            // horizontal line at highest high (solid)
+            shapes.push({
+              type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: maxHigh, y1: maxHigh,
+              line: { color: 'rgba(255,165,0,0.9)', width: 1.5, dash: 'solid' }
+            });
+            // horizontal line at the higher of open/close (dashed)
+            shapes.push({
+              type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: ocAtMax, y1: ocAtMax,
+              line: { color: 'rgba(255,165,0,0.6)', width: 1, dash: 'dash' }
+            });
+          }
+        }
+      }
+
+      // Lowest low zone: area between lowest low and the lower of open/close at that bar
+      const minLow = Math.min(...lows);
+      const idxMin = lows.indexOf(minLow);
+      if (idxMin >= 0 && !isNaN(minLow)) {
+        const ocCandidatesMin = [opens[idxMin], closes[idxMin]].filter(v => !isNaN(v));
+        if (ocCandidatesMin.length) {
+          const ocAtMin = Math.min(...ocCandidatesMin);
+          const top = Math.max(minLow, ocAtMin);
+          const bottom = Math.min(minLow, ocAtMin);
+          if (Math.abs(top - bottom) > Number.EPSILON) {
+            shapes.push({
+              type: 'rect', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: bottom, y1: top,
+              fillcolor: 'rgba(0,128,255,0.08)', line: { width: 0 }
+            });
+            // horizontal line at lowest low (solid)
+            shapes.push({
+              type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: minLow, y1: minLow,
+              line: { color: 'rgba(0,128,255,0.9)', width: 1.5, dash: 'solid' }
+            });
+            // horizontal line at the lower of open/close (dashed)
+            shapes.push({
+              type: 'line', xref: 'paper', x0: 0, x1: 1, yref: 'y',
+              y0: ocAtMin, y1: ocAtMin,
+              line: { color: 'rgba(0,128,255,0.6)', width: 1, dash: 'dash' }
+            });
+          }
+        }
+      }
+
+      return shapes;
+    }
+
+    function plotChart(arr, title, container, chartType = "line", sectionName = "chart") {
+      // Parse data rows -> consistent field names
+      const x = arr.map(r => r.Date ?? r.Datetime ?? r.Time ?? "");
+      const open = arr.map(r => Number(r.Open ?? r.o ?? r.open ?? r['1. open'] ?? 0));
+      const high = arr.map(r => Number(r.High ?? r.h ?? r.high ?? r['2. high'] ?? 0));
+      const low = arr.map(r => Number(r.Low ?? r.l ?? r.low ?? r['3. low'] ?? 0));
+      const close = arr.map(r => Number(r.Close ?? r.c ?? r.close ?? r['4. close'] ?? 0));
+      const volume = arr.map(r => Number(r.Volume ?? r.v ?? r.volume ?? 0));
+
+      // Ensure we have something to plot
+      if (!x.length) {
+        container.appendChild(document.createElement("p")).textContent = "No data to plot";
+        return;
+      }
+
+      // remove old chartDiv if exists
+      const old = document.getElementById(`${sectionName}-chartDiv`);
+      if (old) old.remove();
+
+      // create chartDiv
+      const chartDiv = document.createElement("div");
+      chartDiv.id = `${sectionName}-chartDiv`;
+      container.appendChild(chartDiv);
+
+      // build base traces (candlestick/line) and the volume subplot (20%)
+      let priceTrace;
+      if (chartType === "candlestick") {
+        priceTrace = { x, open, high, low, close, type: "candlestick", name: "Price", yaxis: "y1" };
+      } else if (chartType === "bar") {
+        priceTrace = { x, y: close, type: "bar", name: "Close", yaxis: "y1" };
+      } else if (chartType === "area") {
+        priceTrace = { x, y: close, type: "scatter", fill: "tozeroy", mode: "lines", name: "Close", yaxis: "y1" };
+      } else {
+        priceTrace = { x, y: close, type: "scatter", mode: "lines", name: "Close", yaxis: "y1" };
+      }
+
+      // Volume as separate subplot occupying ~20% height below price
+      const volTrace = { x, y: volume, type: "bar", name: "Volume", yaxis: "y2", marker: { opacity: 0.45 } };
+
+      const baseHeight = 720; // total chart height in px
+
+      const layout = {
+        title,
+        height: baseHeight,
+        margin: { t: 40, r: 10, b: 40, l: 50 },
+        showlegend: false,
+        plot_bgcolor: "white",
+        paper_bgcolor: "white",
+        hovermode: "x unified",
+        xaxis: { showgrid: true, tickangle: -45, domain: [0, 1] },
+        yaxis: { domain: [0.25, 1], title: "Price" },
+        yaxis2: { domain: [0.0, 0.2], title: "Volume" },
+      };
+
+      // attach high/low zone shapes
+      const shapes = computeHighLowZones(arr);
+      if (shapes.length) layout.shapes = (layout.shapes || []).concat(shapes);
+
+      // initial traces
+      const traces = [volTrace, priceTrace];
+
+      Plotly.newPlot(chartDiv, traces, layout, { responsive: true });
+    }
+
+    /* -------------------------
+       applyIndicators: compute indicators and replot with subplots
+       - arr: original data array for the section
+       - sectionName: 'intraday'|'daily'
+       - opts: options object from readIndicatorOptions
+    ------------------------- */
+    function applyIndicators(arr, sectionName, opts) {
+      // normalize data
+      const x = arr.map(r => r.Date ?? r.Datetime ?? r.Time ?? "");
+      const open = arr.map(r => Number(r.Open ?? r.o ?? 0));
+      const high = arr.map(r => Number(r.High ?? r.h ?? 0));
+      const low = arr.map(r => Number(r.Low ?? r.l ?? 0));
+      const close = arr.map(r => Number(r.Close ?? r.c ?? 0));
+      const volume = arr.map(r => Number(r.Volume ?? r.v ?? 0));
+
+      // prepare indicator traces & assign yaxis indexes
+      const traces = [];
+      // base price trace type: use candlestick if available length high/low; else line
+      const chartTypeSelect = document.querySelector(`#${sectionName} .chart-type`) ?? document.querySelector(`.chart-type`);
+      const chartType = chartTypeSelect ? chartTypeSelect.value : "candlestick";
+      let priceTrace;
+      if (chartType === "candlestick") {
+        priceTrace = { x, open, high, low, close, type: "candlestick", name: "Price", yaxis: "y1" };
+      } else {
+        priceTrace = { x, y: close, type: "scatter", mode: "lines", name: "Close", yaxis: "y1" };
+      }
+      const volTrace = { x, y: volume, type: "bar", name: "Volume", yaxis: "y2", marker: { opacity: 0.45 } };
+
+      // collect overlay traces (yaxis: 'y1') and subplot traces (yaxis: y3,y4...)
+      let overlays = [];
+      let subplotTraces = []; // will be assigned yaxis y3,y4...
+      let subplotCount = 0;
+
+      // Overlays:
+      if (opts.ma) {
+        let maVals;
+        if (opts.maType === "SMA") maVals = sma(close, opts.maPeriod);
+        else if (opts.maType === "EMA") maVals = ema(close, opts.maPeriod);
+        else if (opts.maType === "WMA") maVals = wma(close, opts.maPeriod);
+        else maVals = tma(close, opts.maPeriod);
+        overlays.push({ x, y: maVals, type: "scatter", mode: "lines", name: `${opts.maType}(${opts.maPeriod})`, yaxis: "y1" });
+      }
+
+      if (opts.bb) {
+        const bb = bollinger(close, opts.bbPeriod, opts.bbMult);
+        overlays.push({ x, y: bb.upper, type: "scatter", mode: "lines", line: { dash: "dot" }, name: `BB Upper`, yaxis: "y1" });
+        overlays.push({ x, y: bb.mid, type: "scatter", mode: "lines", name: `BB Mid`, yaxis: "y1" });
+        overlays.push({ x, y: bb.lower, type: "scatter", mode: "lines", line: { dash: "dot" }, name: `BB Lower`, yaxis: "y1" });
+      }
+
+      if (opts.kc) {
+        const kc = keltner(close, high, low, opts.kcEma, opts.kcEma, opts.kcMult);
+        overlays.push({ x, y: kc.upper, type: "scatter", mode: "lines", name: `KC Upper`, yaxis: "y1" });
+        overlays.push({ x, y: kc.mid, type: "scatter", mode: "lines", name: `KC Mid`, yaxis: "y1" });
+        overlays.push({ x, y: kc.lower, type: "scatter", mode: "lines", name: `KC Lower`, yaxis: "y1" });
+      }
+
+      if (opts.donch) {
+        const dc = donchian(high, low, opts.donchPeriod);
+        overlays.push({ x, y: dc.upper, type: "scatter", mode: "lines", name: `Donchian Upper`, yaxis: "y1" });
+        overlays.push({ x, y: dc.lower, type: "scatter", mode: "lines", name: `Donchian Lower`, yaxis: "y1" });
+      }
+
+      if (opts.super) {
+        const st = supertrend(close, high, low, opts.superAtr, opts.superFactor);
+        overlays.push({ x, y: st.line, type: "scatter", mode: "lines", name: `Supertrend`, yaxis: "y1" });
+      }
+
+      // Subplots (count each)
+      if (opts.atr) {
+        const atrVals = ATR(high, low, close, opts.atrPeriod);
+        subplotCount++;
+        subplotTraces.push({ x, y: atrVals, type: "scatter", mode: "lines", name: `ATR(${opts.atrPeriod})`, yaxis: `y${2 + subplotCount}` });
+      }
+
+      if (opts.macd) {
+        const macd = macdCalc(close, opts.macdFast, opts.macdSlow, opts.macdSig);
+        subplotCount++;
+        const yaxisIdx = 2 + subplotCount;
+        subplotTraces.push({ x, y: macd.macd, type: "scatter", mode: "lines", name: `MACD`, yaxis: `y${yaxisIdx}` });
+        subplotTraces.push({ x, y: macd.signalLine, type: "scatter", mode: "lines", name: `Signal`, yaxis: `y${yaxisIdx}` });
+        subplotTraces.push({ x, y: macd.hist, type: "bar", name: `MACD Hist`, yaxis: `y${yaxisIdx}` });
+      }
+
+      if (opts.rsi) {
+        const r = rsiCalc(close, opts.rsiPeriod);
+        subplotCount++;
+        subplotTraces.push({ x, y: r, type: "scatter", mode: "lines", name: `RSI(${opts.rsiPeriod})`, yaxis: `y${2 + subplotCount}` });
+      }
+
+      if (opts.stoch) {
+        const st = stochCalc(high, low, close, opts.stochK, opts.stochD);
+        subplotCount++;
+        subplotTraces.push({ x, y: st.k, type: "scatter", mode: "lines", name: `%K`, yaxis: `y${2 + subplotCount}` });
+        subplotTraces.push({ x, y: st.d, type: "scatter", mode: "lines", name: `%D`, yaxis: `y${2 + subplotCount}` });
+      }
+
+      if (opts.obv) {
+        const obv = obvCalc(close, volume);
+        subplotCount++;
+        subplotTraces.push({ x, y: obv, type: "scatter", mode: "lines", name: `OBV`, yaxis: `y${2 + subplotCount}` });
+      }
+
+      // Compose traces: volume bottom, overlays mapped on price (overlay traces will be added later)
+      const allTraces = [volTrace, priceTrace, ...overlays, ...subplotTraces];
+
+      // layout with dynamic domains:
+      const totalHeight = 720;
+      const volumeFrac = 0.20; // 20% for volume
+      const subplotPx = 150;
+      const subplotTotalPx = subplotPx * subplotCount;
+      const priceTop = 1.0;
+      const priceBottom = (subplotTotalPx + (totalHeight * volumeFrac)) / totalHeight + 0.01; // start fraction for price
+      const volTop = (subplotTotalPx + (totalHeight * volumeFrac)) / totalHeight - 0.005;
+      const volBottom = (subplotTotalPx) / totalHeight + 0.005;
+
+      const layout = {
+        title: sectionName === "intraday" ? "Intraday (with indicators)" : "Daily (with indicators)",
+        height: totalHeight,
+        margin: { t: 40, r: 10, b: 40, l: 50 },
+        plot_bgcolor: "white",
+        paper_bgcolor: "white",
+        font: { color: "#222" },
+        xaxis: { domain: [0, 1], showgrid: true, tickangle: -45 },
+        yaxis: { domain: [priceBottom, priceTop], title: "Price" },
+        yaxis2: { domain: [volBottom, volTop], title: "Volume" },
+        showlegend: true,
+      };
+
+      // create subplot domains for each subplot trace group:
+      let currentBottom = 0.0;
+      for (let i = 1; i <= subplotCount; i++) {
+        const top = (currentBottom * totalHeight + subplotPx) / totalHeight;
+        const axisIdx = 2 + i;
+        layout[`yaxis${axisIdx}`] = { domain: [currentBottom + 0.007, top - 0.007], title: `Indicator` };
+        currentBottom = top;
+      }
+
+      // attach high/low zone shapes for indicators plot as well (price axis is 'y')
+      const shapes2 = computeHighLowZones(arr);
+      if (shapes2.length) layout.shapes = (layout.shapes || []).concat(shapes2);
+
+      // finally plot
+      const chartDiv = document.getElementById(`${sectionName}-chartDiv`);
+      if (chartDiv) {
+        Plotly.newPlot(chartDiv, allTraces, layout, { responsive: true });
+      } else {
+        // safe fallback: create and plot
+        const container = document.getElementById("dataContainer");
+        const cd = document.createElement("div");
+        cd.id = `${sectionName}-chartDiv`;
+        container.appendChild(cd);
+        Plotly.newPlot(cd, allTraces, layout, { responsive: true });
+      }
+    }
+
+    /* -------------------------
+       Lightweight wrappers for existing table helpers
+       (copied from your previous code snippet)
+    ------------------------- */
+    // format numeric values for table cells (convert large numbers to Crore "Cr")
+    function formatCellValue(val) {
+      if (val === null || val === undefined) return "";
+      // if already a number keep it, otherwise try to parse numeric-like strings
+      const num = (typeof val === "number") ? val : (typeof val === "string" && val.trim() !== "" && !isNaN(Number(val)) ? Number(val) : null);
+      if (num !== null) {
+        // convert to Crore for values >= 1e7
+        if (Math.abs(num) >= 1e7) {
+          const cr = num / 1e7;
+          return `${cr.toFixed(2)} Cr`;
+        }
+        // otherwise use locale formatting (keeps commas)
+        return num.toLocaleString();
+      }
+      // fallback: preserve original string
+      return String(val);
+    }
+
+    // format values specifically for the Info table (handles timestamps, objects, numbers)
+    function formatInfoValue(v, key) {
+      if (v === null || v === undefined) return "";
+      // objects -> pretty JSON block
+      if (typeof v === "object") return `<pre style="margin:0;padding:6px;background:#fafafa;border-radius:6px">${JSON.stringify(v, null, 2)}</pre>`;
+      // arrays -> JSON
+      if (Array.isArray(v)) return `<pre style="margin:0;padding:6px;background:#fafafa;border-radius:6px">${JSON.stringify(v, null, 2)}</pre>`;
+
+      const keyLower = (key || "").toLowerCase();
+      const s = String(v).trim();
+
+      // helper: try numeric unix timestamp (10s or 13ms) -> Date
+      const tryUnixToDate = (str) => {
+        if (!/^\d{10,13}$/.test(str)) return null;
+        const n = Number(str);
+        const date = (str.length >= 13) ? new Date(n) : new Date(n * 1000);
+        return isNaN(date.getTime()) ? null : date;
+      };
+
+      // If key suggests date/time/timestamp, prefer parsing as date
+      if (keyLower.match(/date|time|timestamp|datetime/)) {
+        // numeric unix timestamp
+        const dtFromNum = tryUnixToDate(s);
+        if (dtFromNum) return dtFromNum.toLocaleString();
+
+        // ISO or other date string
+        const iso = new Date(s);
+        if (!isNaN(iso.getTime()) && iso.getFullYear() > 1970) return iso.toLocaleString();
+      }
+
+      // NOTE: do NOT convert numeric values to Date unless the key indicates a date/time/timestamp.
+      // (Removed previous unconditional conversion here.)
+
+      // numbers -> use existing formatter
+      if (!isNaN(Number(s)) && s !== "") return formatCellValue(Number(s));
+
+      // fallback plain string (escape basic HTML)
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+ 
+    function createTable(obj) {
+      if (!obj || Object.keys(obj).length === 0) return "<p>No data</p>";
+      const rows = Object.entries(obj).map(([k, v]) => {
+        const formatted = formatInfoValue(v, k);
+        return `<tr><td style="font-weight:600">${k}</td><td>${formatted}</td></tr>`;
+      }).join("");
+      return `<table class="info-table"><tbody>${rows}</tbody></table>`;
+    }
+
+    function createTableFromArray(arr) {
+      if (!arr?.length) return "<p>No data</p>";
+      const headers = Object.keys(arr[0]);
+      const headerRow = headers.map(h => `<th>${h}</th>`).join("");
+      const bodyRows = arr.map(row => {
+        return `<tr>${headers.map(h => `<td>${formatCellValue(row[h])}</td>`).join("")}</tr>`;
+      }).join("");
+      return `<table class="data-table-inner"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table>`;
+    }
+
+    // start after DOM ready so elements exist and handlers attach reliably
+    window.addEventListener('DOMContentLoaded', main);
+   </script>
+
+  <style>
+    body { font-family: "Segoe UI", Roboto, sans-serif; background: #f4f7fa; color: #333; padding: 2rem; margin: 0; }
+    /* compact form so all controls stay on one row */
+    #form {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.4rem;
+      justify-content: flex-start;
+      align-items: center;
+      background: white;
+      padding: 0.45rem 0.6rem;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      max-width: 980px;
+      margin: 1rem auto;
+      overflow: hidden;
+    }
+    input, button, select { padding: 0.32rem 0.5rem; font-size: 0.85rem; border-radius: 6px; border:1px solid #ccc; }
+    #symbol { width:120px; min-width:90px; }
+    button.fetch-btn { background:#2a9d8f; color:white; border:none; cursor:pointer; padding: 6px 10px; border-radius:6px; }
+    button.fetch-btn:hover { background:#21867a; }
+
+    /* allow wrapping on very small screens */
+    @media (max-width: 640px) {
+      #form { flex-wrap: wrap; gap: 0.35rem; padding: 0.5rem; }
+      #symbol { width: 100%; }
+      .fetch-btn { width: 100%; }
+    }
+     /* tabs live in the form row; push them to the right */
+    .tabs { display:flex; gap:0.4rem; margin-left:auto; margin-top:0; align-items:center; flex-wrap:wrap; }
+     .tab-btn { background:#e0e0e0; border:none; padding:0.4rem 0.8rem; border-radius:6px; cursor:pointer; white-space:nowrap; transition:0.3s; }
+     .tab-btn.active, .tab-btn:hover { background:#2a9d8f; color:white; }
+     #dataContainer { background:white; margin-top:1rem; padding:1rem; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,0.05); overflow-x:auto; }
+     .section-controls { display:flex; justify-content:flex-end; gap:0.6rem; margin-bottom:0.5rem; align-items:center; }
+     .section-controls select { padding:6px 10px; border-radius:6px; border:1px solid #ccc; background:#fff; }
+     .toggle-btn { background:#457b9d; color:white; border:none; border-radius:6px; cursor:pointer; padding:6px 10px; }
+     .toggle-btn:hover { background:#35617c; }
+     table { border-collapse:collapse; width:100%; margin-top:0.5rem; }
+     th, td { border:1px solid #ddd; padding:8px; text-align:left; }
+     th { background:#2a4d69; color:white; }
+     pre { background:#1e1e1e; color:#dcdcdc; padding:1rem; border-radius:10px; overflow-x:auto; font-family:monospace; font-size:0.9rem; }
+     .table-wrapper { background:white; }
+     .data-table-inner { margin-bottom:8px; }
+     .indicator-controls { display:flex; gap:8px; align-items:center; }
+     .status { margin-top:0.6rem; text-align:center; font-weight:600; }
+     .status--loading { color: #0ea5a4; }
+     .status--success { color: #059669; }
+     .status--error { color: #ef4444; }
+   </style>
 </head>
 <body>
+  <form id="form">
+    <input type="text" id="symbol" placeholder="Symbol (e.g., TCS)" required />
+    <button type="submit" class="fetch-btn">Fetch</button>
 
-<form id="form">
-  <input type="text" id="symbol" placeholder="Symbol (e.g., TCS)" required />
-  <select id="exchange">
-    <option value="NSE" selected>NSE</option>
-    <option value="BSE">BSE</option>
-    <option value="NASDAQ">NASDAQ</option>
-    <option value="NYSE">NYSE</option>
-  </select>
-  <button type="submit" class="fetch-btn">Fetch</button>
-</form>
+    <!-- section buttons moved into form so they sit on the same row -->
+    <div class="tabs" role="tablist" aria-label="Sections">
+      <button type="button" class="tab-btn active" data-section="debug">Debug</button>
+      <button type="button" class="tab-btn" data-section="info">Info</button>
+      <button type="button" class="tab-btn" data-section="intraday">Intraday</button>
+      <button type="button" class="tab-btn" data-section="daily">Daily</button>
+      <button type="button" class="tab-btn" data-section="results">Results</button>
+      <button type="button" class="tab-btn" data-section="balance">Balance Sheet</button>
+      <button type="button" class="tab-btn" data-section="cashflow">Cashflow</button>
+    </div>
+  </form>
 
-<div id="status"></div>
+  <script>
+    // Inline/sync fallback: always prevent form default reload and log attempts.
+    (function () {
+      const form = document.getElementById('form');
+      if (!form) return;
+      form.addEventListener('submit', (e) => {
+        console.log('[INLINE] form.submit intercepted — preventing reload');
+        e.preventDefault();
+        e.stopPropagation();
+        // expose the payload so you can see it in console immediately
+        const symbol = document.getElementById('symbol')?.value?.trim() || '';
+        const exchange = (document.getElementById('exchange')?.value?.trim()) || 'NSE';
+        const info = { symbol, exchange, time: new Date().toISOString() };
+        console.log('[INLINE] payload ->', info);
+        // dispatch an event the module can listen for (non-blocking)
+        document.dispatchEvent(new CustomEvent('yftracker:submit', { detail: info }));
+        // show a quick visual hint (if status element exists)
+        const st = document.getElementById('status');
+        if (st) st.textContent = `Submit intercepted: ${symbol || '<empty>'}, ${exchange}`;
+      });
 
-<div class="tabs">
-  <button class="tab-btn active" data-section="debug">Debug</button>
-  <button class="tab-btn" data-section="info">Info</button>
-  <button class="tab-btn" data-section="intraday">Intraday</button>
-  <button class="tab-btn" data-section="daily">Daily</button>
-  <button class="tab-btn" data-section="results">Results</button>
-  <button class="tab-btn" data-section="balance">Balance Sheet</button>
-  <button class="tab-btn" data-section="cashflow">Cashflow</button>
-</div>
-
-<div id="dataContainer"><pre>Waiting for data...</pre></div>
-
-<div id="indicatorControls"></div>
-<div id="daily-chart-container"></div>
-
-<script type="module" src="script-api.js"></script>
-<script type="module" src="script-tables.js"></script>
-<script type="module" src="script-indicators.js"></script>
-<script type="module" src="script-charts.js"></script>
-
+      // helpful heartbeat so you know the inline script ran
+      console.log('[INLINE] submit-preventer active');
+    })();
+  </script>
+ 
+   <div id="status" class="status"></div>
+ 
+   <div id="dataContainer"><pre>Waiting for data...</pre></div>
 </body>
 </html>
